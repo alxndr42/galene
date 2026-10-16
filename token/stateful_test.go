@@ -283,10 +283,8 @@ func expectTokenFile(t *testing.T, filename string, value []*Stateful) {
 }
 
 func TestTokenStorage(t *testing.T) {
-	d := t.TempDir()
-	s := state{
-		filename: filepath.Join(d, "test.jsonl"),
-	}
+	SetStatefulFilename(filepath.Join(t.TempDir(), "test.jsonl"))
+
 	now := time.Now()
 	past := now.Add(-time.Hour)
 	nearFuture := now.Add(time.Hour / 2)
@@ -294,7 +292,8 @@ func TestTokenStorage(t *testing.T) {
 	user1 := "user1"
 	user2 := "user2"
 	user3 := "user3"
-	tokens := []*Stateful{
+
+	tkns := []*Stateful{
 		{
 			Token:       "tok1",
 			Group:       "test",
@@ -318,78 +317,73 @@ func TestTokenStorage(t *testing.T) {
 			Expires:     &nearFuture,
 		},
 	}
-	for i, token := range tokens {
-		new, err := s.Update(token, "")
+	for i, token := range tkns {
+		new, err := tokens.Update(token, "")
 		if err != nil {
 			t.Errorf("Add: %v", err)
 		}
 		if !equal(new, token) {
 			t.Errorf("Add: got %v, expected %v", new, token)
 		}
-		expectTokens(t, s.tokens, tokens[:i+1])
-		expectTokenFile(t, s.filename, tokens[:i+1])
+		expectTokens(t, tokens.tokens, tkns[:i+1])
+		expectTokenFile(t, tokens.filename, tkns[:i+1])
 	}
 
-	s.modTime = time.Time{}
-	_, err := s.load()
+	tokens.configTag = ""
+	tokenList, _, err := tokens.List("test")
 	if err != nil {
-		t.Errorf("Load: %v", err)
+		t.Errorf("List: %v", err)
 	}
-	expectTokens(t, s.tokens, tokens)
+	expectTokenArray(t, tokenList, tkns)
 
-	t1, etag, err := s.Get("tok2")
+	t1, etag, err := tokens.Get("tok2")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	t2 := t1.Clone()
 	soon := now.Add(time.Hour)
 	t2.Expires = &soon
-	_, err = s.Update(t2, "")
+	_, err = tokens.Update(t2, "")
 	if !errors.Is(err, ErrTagMismatch) {
 		t.Errorf("Update: got %v, expected ErrTagMismatch", err)
 	}
-	_, err = s.Update(t2, "\"bad\"")
+	_, err = tokens.Update(t2, "\"bad\"")
 	if !errors.Is(err, ErrTagMismatch) {
 		t.Errorf("Update: got %v, expected ErrTagMismatch", err)
 	}
-	new, err := s.Update(t2, etag)
+	new, err := tokens.Update(t2, etag)
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	tokens[1].Expires = &future
-	if !equal(new, tokens[1]) {
-		t.Errorf("Edit: got %v, expected %v", tokens[1], new)
+	tkns[1].Expires = &future
+	if !equal(new, tkns[1]) {
+		t.Errorf("Edit: got %v, expected %v", tkns[1], new)
 	}
-	expectTokens(t, s.tokens, tokens)
-	expectTokenFile(t, s.filename, tokens)
+	expectTokens(t, tokens.tokens, tkns)
+	expectTokenFile(t, tokens.filename, tkns)
 
-	for t := range s.tokens {
-		delete(s.tokens, t)
-	}
-
-	err = s.rewrite()
-	if err != nil {
-		t.Errorf("rewrite(empty): %v", err)
+	for idx, token := range tkns {
+		if err := tokens.Delete(token.Token, tokens.configTag); err != nil {
+			t.Errorf("Delete: got %q at index %v", err, idx)
+		}
 	}
 
-	_, err = os.Stat(s.filename)
+	_, err = os.Stat(tokens.filename)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("existence check: %v", err)
 	}
 }
 
 func TestExpire(t *testing.T) {
-	d := t.TempDir()
-	s := state{
-		filename: filepath.Join(d, "test.jsonl"),
-	}
+	SetStatefulFilename(filepath.Join(t.TempDir(), "test.jsonl"))
+
 	now := time.Now()
 	future := now.Add(time.Hour)
 	past := now.Add(-time.Hour * 24 * 6)
 	longPast := now.Add(-time.Hour * 24 * 8)
 	user := "user"
 
-	tokens := []*Stateful{
+	tkns := []*Stateful{
 		{
 			Token:       "tok1",
 			Group:       "test",
@@ -426,22 +420,21 @@ func TestExpire(t *testing.T) {
 			Expires:     &longPast,
 		},
 	}
-
-	for _, token := range tokens {
-		_, err := s.Update(token, "")
+	for _, token := range tkns {
+		_, err := tokens.Update(token, "")
 		if err != nil {
 			t.Errorf("Add: %v", err)
 		}
 	}
 
-	expectTokens(t, s.tokens, tokens)
-	expectTokenFile(t, s.filename, tokens)
+	expectTokens(t, tokens.tokens, tkns)
+	expectTokenFile(t, tokens.filename, tkns)
 
-	err := s.Expire()
+	err := tokens.Expire()
 	if err != nil {
 		t.Errorf("Expire: %v", err)
 	}
 
-	expectTokens(t, s.tokens, tokens[:len(tokens)-1])
-	expectTokenFile(t, s.filename, tokens[:len(tokens)-1])
+	expectTokens(t, tokens.tokens, tkns[:len(tkns)-1])
+	expectTokenFile(t, tokens.filename, tkns[:len(tkns)-1])
 }

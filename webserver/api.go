@@ -40,6 +40,15 @@ func isAdminOrExplicitPassword(groupname, user string, creds group.ClientCredent
 			if err == nil && ok {
 				return true
 			}
+		} else {
+			u, _, err := group.GetGlobalUser(*creds.Username)
+			if err != nil {
+				return false
+			}
+			ok, err := u.Password.Match(creds.Password)
+			if err == nil && ok {
+				return true
+			}
 		}
 		return false
 	}
@@ -211,6 +220,8 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, r, stats.GetGroups())
 	case ".groups":
 		apiGroupHandler(w, r, rest)
+	case ".users":
+		apiGlobalUsersHandler(w, r, rest)
 	default:
 		http.NotFound(w, r)
 	}
@@ -332,6 +343,132 @@ func apiGroupHandler(w http.ResponseWriter, r *http.Request, pth string) {
 		}
 		err = group.DeleteDescription(g, etag)
 		if err != nil {
+			httpError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	methodNotAllowed(w, "HEAD, GET, PUT, DELETE")
+	return
+}
+
+func apiGlobalUsersHandler(w http.ResponseWriter, r *http.Request, pth string) {
+	first, kind, rest := splitPath(pth)
+	if kind != "" && kind != ".password" {
+		notFound(w)
+		return
+	}
+	if rest != "" {
+		notFound(w)
+		return
+	}
+
+	username := ""
+	if first != "" {
+		username = first[1:]
+	}
+
+	// List global usernames
+	if username == "" && kind == "" {
+		if apiCORS(w, r, "HEAD, GET") {
+			return
+		}
+		if !checkAdmin(w, r, "") {
+			return
+		}
+		if r.Method != "HEAD" && r.Method != "GET" {
+			methodNotAllowed(w, "HEAD, GET")
+			return
+		}
+		names, etag, err := group.GetGlobalUsernames()
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		w.Header().Set("etag", etag)
+		done := checkPreconditions(w, r, etag)
+		if done {
+			return
+		}
+		sendJSON(w, r, names)
+		return
+	}
+
+	// Update a global user's password
+	if kind == ".password" {
+		passwordHandler(w, r, "", username, false)
+		return
+	}
+
+	if apiCORS(w, r, "HEAD, GET, PUT, DELETE") {
+		return
+	}
+	if !checkAdmin(w, r, "") {
+		return
+	}
+
+	// Create/delete a global user
+	if r.Method == "HEAD" || r.Method == "GET" {
+		_, etag, err := group.GetGlobalUser(username)
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+
+		w.Header().Set("etag", etag)
+		done := checkPreconditions(w, r, etag)
+		if done {
+			return
+		}
+
+		sendJSON(w, r, map[string]any{})
+		return
+	} else if r.Method == "PUT" {
+		_, etag, err := group.GetGlobalUser(username)
+		if errors.Is(err, group.ErrNoSuchUsername) {
+			err = nil
+			etag = ""
+		} else if err != nil {
+			httpError(w, err)
+			return
+		}
+
+		done := checkPreconditions(w, r, etag)
+		if done {
+			return
+		}
+
+		// Global users are for authentication, permissions are ignored
+		var desc group.UserDescription
+		done = getJSON(w, r, &desc)
+		if done {
+			return
+		}
+
+		if etag == "" {
+			if err := group.AddGlobalUser(username); err != nil {
+				httpError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+		return
+	} else if r.Method == "DELETE" {
+		_, etag, err := group.GetGlobalUser(username)
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+
+		done := checkPreconditions(w, r, etag)
+		if done {
+			return
+		}
+
+		if err := group.DeleteGlobalUser(username, etag); err != nil {
 			httpError(w, err)
 			return
 		}
@@ -498,7 +635,12 @@ func passwordHandler(w http.ResponseWriter, r *http.Request, g, user string, wil
 		if done {
 			return
 		}
-		err := group.SetUserPassword(g, user, wildcard, pw)
+		var err error
+		if g != "" {
+			err = group.SetUserPassword(g, user, wildcard, pw)
+		} else {
+			err = group.SetGlobalUserPassword(user, pw)
+		}
 		if err != nil {
 			httpError(w, err)
 			return
@@ -521,7 +663,11 @@ func passwordHandler(w http.ResponseWriter, r *http.Request, g, user string, wil
 			Type: "bcrypt",
 			Key:  &k,
 		}
-		err = group.SetUserPassword(g, user, wildcard, pw)
+		if g != "" {
+			err = group.SetUserPassword(g, user, wildcard, pw)
+		} else {
+			err = group.SetGlobalUserPassword(user, pw)
+		}
 		if err != nil {
 			httpError(w, err)
 			return
@@ -529,7 +675,12 @@ func passwordHandler(w http.ResponseWriter, r *http.Request, g, user string, wil
 		w.WriteHeader(http.StatusNoContent)
 		return
 	} else if r.Method == "DELETE" {
-		err := group.SetUserPassword(g, user, wildcard, group.Password{})
+		var err error
+		if g != "" {
+			err = group.SetUserPassword(g, user, wildcard, group.Password{})
+		} else {
+			err = group.SetGlobalUserPassword(user, group.Password{})
+		}
 		if err != nil {
 			httpError(w, err)
 			return
