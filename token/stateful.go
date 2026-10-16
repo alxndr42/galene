@@ -3,14 +3,14 @@ package token
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jech/galene/config"
 )
 
 var ErrTagMismatch = errors.New("tag mismatch")
@@ -46,11 +46,11 @@ func (token *Stateful) Clone() *Stateful {
 // a file.  The synchronisation is slightly racy, so both reading and
 // modifying tokens are protected by a mutex.
 type state struct {
-	filename string
-	mu       sync.Mutex
-	fileSize int64
-	modTime  time.Time
-	tokens   map[string]*Stateful
+	filename   string
+	mu         sync.Mutex
+	configFile config.ConfigFile
+	configTag  string
+	tokens     map[string]*Stateful
 }
 
 var tokens state
@@ -59,15 +59,15 @@ func SetStatefulFilename(filename string) {
 	tokens.mu.Lock()
 	defer tokens.mu.Unlock()
 	tokens.filename = filename
-	tokens.fileSize = 0
-	tokens.modTime = time.Time{}
+	tokens.configFile = config.NewConfigFile(filename)
+	tokens.configTag = ""
+	tokens.tokens = nil
 }
 
 func (state *state) Get(token string) (*Stateful, string, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	etag, err := state.load()
-	if err != nil {
+	if err := state.load(); err != nil {
 		return nil, "", err
 	}
 	if state.tokens == nil {
@@ -77,7 +77,7 @@ func (state *state) Get(token string) (*Stateful, string, error) {
 	if t == nil {
 		return nil, "", os.ErrNotExist
 	}
-	return t, etag, nil
+	return t, state.configTag, nil
 }
 
 // Get fetches a stateful token.
@@ -129,77 +129,44 @@ func (token *Stateful) NeedsUsername() bool {
 
 // called locked
 func (state *state) reset() {
-	state.modTime = time.Time{}
-	state.fileSize = 0
+	state.configTag = ""
 	state.tokens = nil
 }
 
 // load updates the state from the corresponding file.
 // called locked
-func (state *state) load() (string, error) {
-	if state.filename == "" {
-		state.reset()
-		return "", nil
-	}
+func (state *state) load() error {
+	currentTag := state.configFile.Tag()
+	if currentTag != state.configTag {
+		err := state.configFile.Read(func(r io.Reader) error {
+			if r == nil {
+				state.reset()
+				return nil
+			}
 
-	fi, err := os.Stat(state.filename)
-	if err != nil {
-		state.reset()
-		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
+			ts := make(map[string]*Stateful)
+			decoder := json.NewDecoder(r)
+			for {
+				var t Stateful
+				err := decoder.Decode(&t)
+				if err == io.EOF {
+					break
+				} else if err != nil {
+					state.reset()
+					return err
+				}
+				ts[t.Token] = &t
+			}
+			state.tokens = ts
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return "", err
-	}
 
-	if state.modTime.Equal(fi.ModTime()) && state.fileSize == fi.Size() {
-		return state.etag(), nil
+		state.configTag = currentTag
 	}
-
-	f, err := os.Open(state.filename)
-	if err != nil {
-		state.reset()
-		if errors.Is(err, os.ErrNotExist) {
-			return state.etag(), nil
-		}
-		return "", err
-	}
-
-	defer f.Close()
-
-	ts := make(map[string]*Stateful)
-	decoder := json.NewDecoder(f)
-	for {
-		var t Stateful
-		err := decoder.Decode(&t)
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			state.reset()
-			return "", err
-		}
-		ts[t.Token] = &t
-	}
-	state.tokens = ts
-	fi, err = f.Stat()
-	if err != nil {
-		state.reset()
-		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
-		}
-		return "", err
-	}
-	state.modTime = fi.ModTime()
-	state.fileSize = fi.Size()
-	return state.etag(), nil
-}
-
-func (state *state) etag() string {
-	if state.modTime.Equal(time.Time{}) {
-		return ""
-	}
-	return fmt.Sprintf("\"%v-%v\"",
-		state.fileSize, state.modTime.UnixNano(),
-	)
+	return nil
 }
 
 // Update adds or updates a token.
@@ -216,8 +183,7 @@ func (state *state) Update(token *Stateful, etag string) (*Stateful, error) {
 		return nil, os.ErrNotExist
 	}
 
-	_, err := state.load()
-	if err != nil {
+	if err := state.load(); err != nil {
 		return nil, err
 	}
 
@@ -227,12 +193,11 @@ func (state *state) Update(token *Stateful, etag string) (*Stateful, error) {
 
 	old, ok := state.tokens[token.Token]
 	if ok {
-		if etag != state.etag() {
+		if etag != state.configTag {
 			return nil, ErrTagMismatch
 		}
 		state.tokens[token.Token] = token
-		err = state.rewrite()
-		if err != nil {
+		if err := state.rewrite(); err != nil {
 			state.tokens[token.Token] = old
 			return nil, err
 		}
@@ -257,8 +222,7 @@ func (state *state) Delete(token string, etag string) error {
 		return os.ErrNotExist
 	}
 
-	_, err := state.load()
-	if err != nil {
+	if err := state.load(); err != nil {
 		return err
 	}
 
@@ -270,12 +234,11 @@ func (state *state) Delete(token string, etag string) error {
 	if !ok {
 		return os.ErrNotExist
 	}
-	if etag != state.etag() {
+	if etag != state.configTag {
 		return ErrTagMismatch
 	}
 	delete(state.tokens, token)
-	err = state.rewrite()
-	if err != nil {
+	if err := state.rewrite(); err != nil {
 		state.tokens[token] = old
 		return err
 	}
@@ -285,37 +248,20 @@ func (state *state) Delete(token string, etag string) error {
 // add unconditionally adds a token, which is assumed to not exist.
 // called locked
 func (state *state) add(token *Stateful) (*Stateful, error) {
-	err := os.MkdirAll(filepath.Dir(state.filename), 0700)
+	err := state.configFile.Append(state.configTag, func(w io.Writer) error {
+		encoder := json.NewEncoder(w)
+		return encoder.Encode(token)
+	})
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(state.filename,
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	encoder := json.NewEncoder(f)
-	err = encoder.Encode(token)
-	if err != nil {
-		return nil, err
-	}
+	state.configTag = state.configFile.Tag()
 
 	if state.tokens == nil {
 		state.tokens = make(map[string]*Stateful)
 	}
 	state.tokens[token.Token] = token.Clone()
 
-	fi, err := f.Stat()
-	if err == nil {
-		state.modTime = fi.ModTime()
-		state.fileSize = fi.Size()
-	} else {
-		// This shouldn't happen.  Force full read next time.
-		state.reset()
-	}
 	return token, nil
 }
 
@@ -326,54 +272,23 @@ func Update(token *Stateful, etag string) (*Stateful, error) {
 // called locked
 func (state *state) rewrite() error {
 	if state.tokens == nil || len(state.tokens) == 0 {
-		err := os.Remove(state.filename)
-		if err == nil || errors.Is(err, os.ErrNotExist) {
-			return nil
+		return state.configFile.Delete(state.configTag)
+	}
+
+	err := state.configFile.Write(state.configTag, func(w io.Writer) error {
+		encoder := json.NewEncoder(w)
+		for _, t := range state.tokens {
+			err := encoder.Encode(t)
+			if err != nil {
+				return err
+			}
 		}
-		return err
-	}
-
-	dir := filepath.Dir(state.filename)
-	tmpfile, err := os.CreateTemp(dir, "tokens")
+		return nil
+	})
 	if err != nil {
-		return err
+		return nil
 	}
-	a, _, err := state.list("", true)
-	if err != nil {
-		os.Remove(tmpfile.Name())
-		return err
-	}
-	encoder := json.NewEncoder(tmpfile)
-	for _, t := range a {
-		err := encoder.Encode(t)
-		if err != nil {
-			tmpfile.Close()
-			os.Remove(tmpfile.Name())
-			return err
-		}
-	}
-
-	err = tmpfile.Close()
-	if err != nil {
-		os.Remove(tmpfile.Name())
-		return err
-	}
-
-	err = os.Rename(tmpfile.Name(), state.filename)
-	if err != nil {
-		os.Remove(tmpfile.Name())
-		return err
-	}
-
-	fi, err := os.Stat(state.filename)
-	if err == nil {
-		state.modTime = fi.ModTime()
-		state.fileSize = fi.Size()
-	} else {
-		// This shouldn't happen, force rereading next time
-		state.reset()
-	}
-
+	state.configTag = state.configFile.Tag()
 	return nil
 }
 
@@ -382,14 +297,13 @@ func (state *state) list(group string, all bool) ([]*Stateful, string, error) {
 	if group != "" && all {
 		return nil, "", errors.New("cannot specify both group and all")
 	}
-	_, err := state.load()
-	if err != nil {
+	if err := state.load(); err != nil {
 		return nil, "", err
 	}
 
 	a := make([]*Stateful, 0)
 	if state.tokens == nil {
-		return a, state.etag(), nil
+		return a, state.configTag, nil
 	}
 	for _, t := range state.tokens {
 		if !all && t.Group != group {
@@ -406,7 +320,7 @@ func (state *state) list(group string, all bool) ([]*Stateful, string, error) {
 		}
 		return (*a[i].Expires).Before(*a[j].Expires)
 	})
-	return a, state.etag(), nil
+	return a, state.configTag, nil
 }
 
 func (state *state) List(group string) ([]*Stateful, string, error) {
@@ -423,8 +337,7 @@ func (state *state) Expire() error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	_, err := state.load()
-	if err != nil {
+	if err := state.load(); err != nil {
 		return err
 	}
 

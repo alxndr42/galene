@@ -1,29 +1,17 @@
 package token
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestToken(t *testing.T) {
-	d := t.TempDir()
-	tokens = state{
-		filename: filepath.Join(d, "test.jsonl"),
-	}
-
-	f, err := os.OpenFile(tokens.filename,
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600,
-	)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	f.Close()
+	SetStatefulFilename(filepath.Join(t.TempDir(), "test.jsonl"))
 
 	future := time.Now().Add(time.Hour)
 	user := "user"
-	_, err = Update(&Stateful{
+	_, err := Update(&Stateful{
 		Token:       "token",
 		Group:       "group",
 		Username:    &user,
