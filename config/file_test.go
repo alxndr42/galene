@@ -74,7 +74,7 @@ func TestWrite(t *testing.T) {
 	}
 
 	err = state.file.Write(state.tag, func(w io.Writer) error {
-		_, err := w.Write([]byte("test again"))
+		_, err := w.Write([]byte("another test"))
 		return err
 	})
 	if err != nil {
@@ -85,7 +85,47 @@ func TestWrite(t *testing.T) {
 	if err = state.file.Read(handler); err != nil {
 		t.Fatalf("Read: got %q", err)
 	}
-	assertState(t, &state, "test again", false)
+	assertState(t, &state, "another test", false)
+}
+
+func TestAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.txt")
+	state := configState{file: NewConfigFile(path)}
+	handler := makeReadHandler(&state)
+
+	err := state.file.Write("", func(w io.Writer) error {
+		_, err := w.Write([]byte("foo"))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("Write: got %q", err)
+	}
+
+	state.tag = state.file.Tag()
+	if err = state.file.Read(handler); err != nil {
+		t.Fatalf("Read: got %q", err)
+	}
+	assertState(t, &state, "foo", false)
+
+	err = state.file.Append("", func(w io.Writer) error { return nil })
+	if !errors.Is(err, ErrTagMismatch) {
+		t.Errorf("Write: expected ErrTagMismatch, got %q", err)
+	}
+
+	err = state.file.Append(state.tag, func(w io.Writer) error {
+		_, err := w.Write([]byte("bar"))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("Write: got %q", err)
+	}
+
+	state.tag = state.file.Tag()
+	if err = state.file.Read(handler); err != nil {
+		t.Fatalf("Read: got %q", err)
+	}
+	assertState(t, &state, "foobar", false)
 }
 
 func TestDelete(t *testing.T) {

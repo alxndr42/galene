@@ -107,6 +107,26 @@ func (cf *ConfigFile) Write(tag string, handler func(w io.Writer) error) error {
 	return nil
 }
 
+// Append to the file using a handler function.
+// The tag must match the current file tag value.
+func (cf *ConfigFile) Append(tag string, handler func(w io.Writer) error) error {
+	if cf.Tag() != tag {
+		return ErrTagMismatch
+	}
+
+	err := os.MkdirAll(filepath.Dir(cf.path), 0700)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(cf.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return handler(f)
+}
+
 // Delete the file.
 // The tag must match the current file tag value.
 func (cf *ConfigFile) Delete(tag string) error {
