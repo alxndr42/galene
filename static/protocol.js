@@ -726,6 +726,7 @@ ServerConnection.prototype.newUpStream = function(localId) {
     let c = new Stream(this, id, localId || newLocalId(), pc, true);
     if(oldId)
         c.replace = oldId;
+    c.source = sc.id;
     c.username = sc.username;
     sc.up[id] = c;
 
@@ -1089,13 +1090,13 @@ function Stream(sc, id, localId, pc, up) {
      */
     this.up = up;
     /**
-     * For down streams, the id of the client that created the stream.
+     * The id of the client that created the stream.
      *
      * @type {string}
      */
     this.source = null;
     /**
-     * For down streams, the username of the client who created the stream.
+     * The username of the client who created the stream.
      *
      * @type {string}
      */
@@ -1519,6 +1520,8 @@ Stream.prototype.updateStats = async function() {
                         stats[id][r.type].rate =
                         ((r.bytesSent - old[id][r.type].bytesSent) * 1000 /
                          (r.timestamp - old[id][r.type].timestamp)) * 8;
+                } else if(stid && r.type === 'media-source') {
+                    updateAudioEnergy(stid, stats, old, r);
                 }
             }
         }
@@ -1535,17 +1538,7 @@ Stream.prototype.updateStats = async function() {
         if(report) {
             for(let r of report.values()) {
                 if(rtid && r.type === 'inbound-rtp') {
-                    if(!('totalAudioEnergy' in r))
-                        continue;
-                    if(!stats[rtid])
-                        stats[rtid] = {};
-                    stats[rtid][r.type] = {};
-                    stats[rtid][r.type].timestamp = r.timestamp;
-                    stats[rtid][r.type].totalAudioEnergy = r.totalAudioEnergy;
-                    if(old[rtid] && old[rtid][r.type])
-                        stats[rtid][r.type].audioEnergy =
-                        (r.totalAudioEnergy - old[rtid][r.type].totalAudioEnergy) * 1000 /
-                        (r.timestamp - old[rtid][r.type].timestamp);
+                    updateAudioEnergy(rtid, stats, old, r);
                 }
             }
         }
@@ -1556,6 +1549,29 @@ Stream.prototype.updateStats = async function() {
     if(c.onstats)
         c.onstats.call(c, c.stats);
 };
+
+/**
+ * Update the stats object with an audioEnergy property based on
+ * the RTCStatsReport dictionary's totalAudioEnergy property.
+ *
+ * @param {string} id - Track ID
+ * @param {Record<string,unknown>} stats - Current stats object
+ * @param {Record<string,unknown>} old - Previous stats object
+ * @param {object} r - RTCStatsReport dictionary
+ */
+function updateAudioEnergy(id, stats, old, r) {
+    if(!('totalAudioEnergy' in r))
+        return;
+    if(!stats[id])
+        stats[id] = {};
+    stats[id][r.type] = {};
+    stats[id][r.type].timestamp = r.timestamp;
+    stats[id][r.type].totalAudioEnergy = r.totalAudioEnergy;
+    if(old[id] && old[id][r.type])
+        stats[id][r.type].audioEnergy =
+            (r.totalAudioEnergy - old[id][r.type].totalAudioEnergy) * 1000 /
+            (r.timestamp - old[id][r.type].timestamp);
+}
 
 /**
  * setStatsInterval sets the interval in milliseconds at which the onstats
