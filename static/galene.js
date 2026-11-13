@@ -714,7 +714,9 @@ getSelectElement('requestselect').onchange = function(e) {
     if(!(this instanceof HTMLSelectElement))
         throw new Error('Unexpected type for this');
     updateSettings({request: this.value});
-    serverConnection.request(mapRequest(this.value));
+    if(serverConnection) {
+        serverConnection.request(mapRequest(this.value));
+    }
     reconsiderDownRate();
 };
 
@@ -727,22 +729,24 @@ getInputElement('activitybox').onchange = function(e) {
     if(!(this instanceof HTMLInputElement))
         throw new Error('Unexpected type for this');
     updateSettings({activityDetection: this.checked});
-    for(let id in serverConnection.down) {
-        let c = serverConnection.down[id];
-        if(this.checked)
-            c.setStatsInterval(activityDetectionInterval);
-        else {
-            c.setStatsInterval(0);
-            setActive(c, false);
+    if(serverConnection) {
+        for(let id in serverConnection.down) {
+            let c = serverConnection.down[id];
+            if(this.checked)
+                c.setStatsInterval(activityDetectionInterval);
+            else {
+                c.setStatsInterval(0);
+                setActive(c, false);
+            }
         }
-    }
-    for(let id in serverConnection.up) {
-        let c = serverConnection.up[id];
-        if(this.checked)
-            c.setStatsInterval(activityDetectionInterval);
-        else {
-            c.setStatsInterval(upStreamLabelInterval);
-            setActive(c, false);
+        for(let id in serverConnection.up) {
+            let c = serverConnection.up[id];
+            if(this.checked)
+                c.setStatsInterval(activityDetectionInterval);
+            else {
+                c.setStatsInterval(upStreamLabelInterval);
+                setActive(c, false);
+            }
         }
     }
 };
@@ -751,10 +755,12 @@ getInputElement('displayallbox').onchange = function(e) {
     if(!(this instanceof HTMLInputElement))
         throw new Error('Unexpected type for this');
     updateSettings({displayAll: this.checked});
-    for(let id in serverConnection.down) {
-        let c = serverConnection.down[id];
-        let elt = document.getElementById('peer-' + c.localId);
-        showHideMedia(c, elt);
+    if(serverConnection) {
+        for(let id in serverConnection.down) {
+            let c = serverConnection.down[id];
+            let elt = document.getElementById('peer-' + c.localId);
+            showHideMedia(c, elt);
+        }
     }
 };
 
@@ -1047,14 +1053,16 @@ let reconsiderParametersTimer = null;
  */
 async function reconsiderSendParameters() {
     cancelReconsiderParameters();
-    let t = getMaxVideoThroughput();
-    let s = doSimulcast();
-    let promises = [];
-    for(let id in serverConnection.up) {
-        let c = serverConnection.up[id];
-        promises.push(setSendParameters(c, t, s));
+    if(serverConnection) {
+        let t = getMaxVideoThroughput();
+        let s = doSimulcast();
+        let promises = [];
+        for(let id in serverConnection.up) {
+            let c = serverConnection.up[id];
+            promises.push(setSendParameters(c, t, s));
+        }
+        await Promise.all(promises);
     }
-    await Promise.all(promises);
 }
 
 /**
