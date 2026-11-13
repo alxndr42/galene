@@ -714,25 +714,39 @@ getSelectElement('requestselect').onchange = function(e) {
     if(!(this instanceof HTMLSelectElement))
         throw new Error('Unexpected type for this');
     updateSettings({request: this.value});
-    serverConnection.request(mapRequest(this.value));
+    if(serverConnection) {
+        serverConnection.request(mapRequest(this.value));
+    }
     reconsiderDownRate();
 };
 
 const activityDetectionInterval = 200;
-const activityDetectionPeriod = 700;
+const activityDetectionPeriod = 500;
 const activityDetectionThreshold = 0.2;
+const upStreamLabelInterval = 2000;
 
 getInputElement('activitybox').onchange = function(e) {
     if(!(this instanceof HTMLInputElement))
         throw new Error('Unexpected type for this');
     updateSettings({activityDetection: this.checked});
-    for(let id in serverConnection.down) {
-        let c = serverConnection.down[id];
-        if(this.checked)
-            c.setStatsInterval(activityDetectionInterval);
-        else {
-            c.setStatsInterval(0);
-            setActive(c, false);
+    if(serverConnection) {
+        for(let id in serverConnection.down) {
+            let c = serverConnection.down[id];
+            if(this.checked)
+                c.setStatsInterval(activityDetectionInterval);
+            else {
+                c.setStatsInterval(0);
+                setActive(c, false);
+            }
+        }
+        for(let id in serverConnection.up) {
+            let c = serverConnection.up[id];
+            if(this.checked)
+                c.setStatsInterval(activityDetectionInterval);
+            else {
+                c.setStatsInterval(upStreamLabelInterval);
+                setActive(c, false);
+            }
         }
     }
 };
@@ -741,10 +755,12 @@ getInputElement('displayallbox').onchange = function(e) {
     if(!(this instanceof HTMLInputElement))
         throw new Error('Unexpected type for this');
     updateSettings({displayAll: this.checked});
-    for(let id in serverConnection.down) {
-        let c = serverConnection.down[id];
-        let elt = document.getElementById('peer-' + c.localId);
-        showHideMedia(c, elt);
+    if(serverConnection) {
+        for(let id in serverConnection.down) {
+            let c = serverConnection.down[id];
+            let elt = document.getElementById('peer-' + c.localId);
+            showHideMedia(c, elt);
+        }
     }
 };
 
@@ -756,24 +772,44 @@ getInputElement('displayallbox').onchange = function(e) {
 function gotUpStats(stats) {
     let c = this;
 
-    let values = [];
+    let lastLabelUpdate = c.userdata.lastLabelUpdate || 0;
+    if(Date.now() - lastLabelUpdate > upStreamLabelInterval) {
+        let values = [];
 
-    for(let id in stats) {
-        if(stats[id] && stats[id]['outbound-rtp']) {
-            let rate = stats[id]['outbound-rtp'].rate;
-            if(typeof rate === 'number') {
-                values.push(rate);
+        for(let id in stats) {
+            if(stats[id] && stats[id]['outbound-rtp']) {
+                let rate = stats[id]['outbound-rtp'].rate;
+                if(typeof rate === 'number') {
+                    values.push(rate);
+                }
             }
         }
+
+        if(values.length === 0) {
+            setUpLabel(c, '');
+        } else {
+            values.sort((x,y) => x - y);
+            setUpLabel(c, values
+                     .map(x => Math.round(x / 1000).toString())
+                     .reduce((x, y) => x + '+' + y));
+        }
+
+        c.userdata.lastLabelUpdate = Date.now();
     }
 
-    if(values.length === 0) {
-        setUpLabel(c, '');
+    if(!getInputElement('activitybox').checked)
+        return;
+
+    let maxEnergy = getMaxEnergy(stats, c.pc.getSenders(), 'media-source');
+    // totalAudioEnergy is defined as the integral of the square of the
+    // volume, so square the threshold.
+    if(maxEnergy > activityDetectionThreshold * activityDetectionThreshold) {
+        c.userdata.lastVoiceActivity = Date.now();
+        setActive(c, true);
     } else {
-        values.sort((x,y) => x - y);
-        setUpLabel(c, values
-                 .map(x => Math.round(x / 1000).toString())
-                 .reduce((x, y) => x + '+' + y));
+        let last = c.userdata.lastVoiceActivity;
+        if(!last || Date.now() - last > activityDetectionPeriod)
+            setActive(c, false);
     }
 }
 
@@ -806,17 +842,7 @@ function gotDownStats(stats) {
         return;
 
     let c = this;
-
-    let maxEnergy = 0;
-
-    c.pc.getReceivers().forEach(r => {
-        let tid = r.track && r.track.id;
-        let s = tid && stats[tid];
-        let energy = s && s['inbound-rtp'] && s['inbound-rtp'].audioEnergy;
-        if(typeof energy === 'number')
-            maxEnergy = Math.max(maxEnergy, energy);
-    });
-
+    let maxEnergy = getMaxEnergy(stats, c.pc.getReceivers(), 'inbound-rtp');
     // totalAudioEnergy is defined as the integral of the square of the
     // volume, so square the threshold.
     if(maxEnergy > activityDetectionThreshold * activityDetectionThreshold) {
@@ -827,6 +853,27 @@ function gotDownStats(stats) {
         if(!last || Date.now() - last > activityDetectionPeriod)
             setActive(c, false);
     }
+}
+
+/**
+ * Return the highest audioEnergy value from all per-track stats with
+ * a matching type, or 0.
+ *
+ * @param {Record<string,any>} stats
+ * @param {Array<RTCRtpReceiver> | Array<RTCRtpSender>} tracks
+ * @param {string} type
+ * @returns {number}
+ */
+function getMaxEnergy(stats, tracks, type) {
+    let maxEnergy = 0;
+    tracks.forEach(info => {
+        let tid = info.track && info.track.id;
+        let s = tid && stats[tid];
+        let energy = s && s[type] && s[type].audioEnergy;
+        if(typeof energy === 'number')
+            maxEnergy = Math.max(maxEnergy, energy);
+    });
+    return maxEnergy;
 }
 
 /**
@@ -1006,14 +1053,16 @@ let reconsiderParametersTimer = null;
  */
 async function reconsiderSendParameters() {
     cancelReconsiderParameters();
-    let t = getMaxVideoThroughput();
-    let s = doSimulcast();
-    let promises = [];
-    for(let id in serverConnection.up) {
-        let c = serverConnection.up[id];
-        promises.push(setSendParameters(c, t, s));
+    if(serverConnection) {
+        let t = getMaxVideoThroughput();
+        let s = doSimulcast();
+        let promises = [];
+        for(let id in serverConnection.up) {
+            let c = serverConnection.up[id];
+            promises.push(setSendParameters(c, t, s));
+        }
+        await Promise.all(promises);
     }
-    await Promise.all(promises);
 }
 
 /**
@@ -1193,7 +1242,10 @@ async function setUpStream(c, stream) {
     };
 
     c.onstats = gotUpStats;
-    c.setStatsInterval(2000);
+    if(getSettings().activityDetection)
+        c.setStatsInterval(activityDetectionInterval);
+    else
+        c.setStatsInterval(upStreamLabelInterval);
 }
 
 /**
